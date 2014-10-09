@@ -83,6 +83,7 @@ object NewRelicAgentTest extends App {
     updateFuture onComplete (completeTransaction(id, _))
   }
 
+  @Trace(dispatcher = true)
   private def completeTransaction(id: String, result: Try[Player]): Unit = {
     if (!NewRelic.getAgent().getTransaction().startAsyncActivity(id)) {
       println("!!! async activity not started")
