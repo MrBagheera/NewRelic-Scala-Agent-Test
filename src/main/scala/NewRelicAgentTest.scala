@@ -78,11 +78,16 @@ object NewRelicAgentTest extends App {
     NewRelic.setTransactionName(null, "test")
     val id = random.alphanumeric.take(10).mkString
     println(s"Starting transaction for $id")
+    NewRelic.getAgent().getTransaction().registerAsyncActivity(id)
     val updateFuture: Future[Player] = playerService.updatePlayerAge(id, random.nextInt(100))
     updateFuture onComplete (completeTransaction(id, _))
   }
 
   private def completeTransaction(id: String, result: Try[Player]): Unit = {
+    if (!NewRelic.getAgent().getTransaction().startAsyncActivity(id)) {
+      println("!!! async activity not started")
+    }
+
     val (httpStatusCode, httpStatusMessage) = result match {
       case Success(player) =>
         println(s"Transaction for $id completed")
