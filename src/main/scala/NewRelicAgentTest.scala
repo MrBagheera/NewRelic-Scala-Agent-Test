@@ -9,6 +9,7 @@ import scala.concurrent.ExecutionContext.Implicits.global
 import scala.concurrent.{Promise, Future}
 import scala.util.{Try, Failure, Random, Success}
 import scala.collection.JavaConversions._
+import scala.async.Async._
 
 case class Player(id: String, name: String, age: Int)
 
@@ -60,11 +61,10 @@ class PlayerRepository {
 class PlayerService(playerRepository: PlayerRepository) {
 
   @Trace
-  def updatePlayerAge(id: String, newAge: Int): Future[Player] = {
-    playerRepository.getPlayer(id) flatMap { player =>
-      val newPlayer = Player(player.id, player.name, newAge)
-      playerRepository.savePlayer(newPlayer)
-    }
+  def updatePlayerAge(id: String, newAge: Int): Future[Player] = async {
+    val player = await(playerRepository.getPlayer(id))
+    val newPlayer = Player(player.id, player.name, newAge)
+    await(playerRepository.savePlayer(newPlayer))
   }
   
 }
@@ -110,6 +110,7 @@ object NewRelicAgentTest extends App {
       },
       responseHolder
     )
+    NewRelic.addCustomParameter("deviceId", "1000")
 
     // ugly hack to kick NewRelic into tracing Scala Future-s
     val tx = NewRelic.getAgent.getTransaction.asInstanceOf[TransactionApiImpl].getTransaction
