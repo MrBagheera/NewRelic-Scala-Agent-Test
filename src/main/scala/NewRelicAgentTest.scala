@@ -11,11 +11,36 @@ import scala.util.{Try, Failure, Random, Success}
 case class Player(id: String, name: String, age: Int)
 
 /**
+ * Helper object for propagating asyn stuff over Scala futures.
+ */
+object Tracing {
+
+  @Trace(dispatcher = true)
+  def trace[T](segmentName: String)(body: => Future[T]): Future[T] = {
+    val jobId = new Object
+    val tx = NewRelic.getAgent().getTransaction()
+    tx.getTracedMethod.setMetricName(segmentName)
+    tx.registerAsyncActivity(jobId)
+
+    val promise = Promise[T]()
+    body onComplete complete(jobId, promise)
+    promise.future
+  }
+
+  @Trace(dispatcher = true)
+  private def complete[T](jobId: Object, promise: Promise[T])(result: Try[T]): Unit = {
+    NewRelic.getAgent().getTransaction().startAsyncActivity(jobId)
+    promise complete result
+  }
+
+}
+
+/**
  * Simulates async IO by returning the future and completing it from some other thread. 
  */
 class PlayerRepository {
 
-  def getPlayer(id: String): Future[Player] = {
+  def getPlayer(id: String): Future[Player] = Tracing.trace("PlayerRepository.getPlayer") {
     val operationPromise = Promise[Player]()
     NewRelicAgentTest.executor.schedule(new Runnable() {
       override def run(): Unit = {
@@ -26,7 +51,7 @@ class PlayerRepository {
     operationPromise.future
   }
   
-  def savePlayer(player: Player): Future[Player] = {
+  def savePlayer(player: Player): Future[Player] = Tracing.trace("PlayerRepository.savePlayer") {
     val operationPromise = Promise[Player]()
     NewRelicAgentTest.executor.schedule(new Runnable() {
       override def run(): Unit = {
@@ -45,7 +70,7 @@ class PlayerRepository {
  */
 class PlayerService(playerRepository: PlayerRepository) {
   
-  def updatePlayerAge(id: String, newAge: Int): Future[Player] = {
+  def updatePlayerAge(id: String, newAge: Int): Future[Player] = Tracing.trace("PlayerService.updatePlayerAge") {
     playerRepository.getPlayer(id) flatMap { player =>
       val newPlayer = Player(player.id, player.name, newAge)
       playerRepository.savePlayer(newPlayer)
@@ -78,23 +103,18 @@ object NewRelicAgentTest extends App {
     NewRelic.setTransactionName(null, "test")
     val id = random.alphanumeric.take(10).mkString
     println(s"Starting transaction for $id")
-    NewRelic.getAgent().getTransaction().registerAsyncActivity(id)
     val updateFuture: Future[Player] = playerService.updatePlayerAge(id, random.nextInt(100))
     updateFuture onComplete (completeTransaction(id, _))
   }
 
-  @Trace(dispatcher = true)
   private def completeTransaction(id: String, result: Try[Player]): Unit = {
-    if (!NewRelic.getAgent().getTransaction().startAsyncActivity(id)) {
-      println("!!! async activity not started")
-    }
-
     val (httpStatusCode, httpStatusMessage) = result match {
       case Success(player) =>
         println(s"Transaction for $id completed")
         (200, "OK")
       case Failure(error) =>
         println(s"Transaction for $id failed with $error")
+        error.printStackTrace()
         (500, "Internal Server Error")
     }
 
