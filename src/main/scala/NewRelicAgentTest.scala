@@ -4,33 +4,79 @@ import java.util.concurrent.{TimeUnit, Executors}
 import com.newrelic.api.agent._
 
 import scala.concurrent.ExecutionContext.Implicits.global
-import scala.concurrent.{Promise, Future}
-import scala.util.{Try, Failure, Random, Success}
+import scala.concurrent.duration.Duration
+import scala.concurrent._
+import scala.util._
 
 
 case class Player(id: String, name: String, age: Int)
 
+
 /**
- * Helper object for propagating asyn stuff over Scala futures.
+ * Helper class to propagate transaction to onComplete callbacks
+ */
+class FutureWrapper[T](val innerFuture: Future[T]) extends Future[T] {
+
+  override def onComplete[U](f: (Try[T]) => U)(implicit executor: ExecutionContext): Unit = {
+    val jobId = new Object
+    val tx = NewRelic.getAgent.getTransaction
+    if (tx == null) {
+      throw new IllegalStateException("No transaction available")
+    }
+    tx.registerAsyncActivity(jobId)
+
+    innerFuture onComplete onCompleteWrapper(jobId, f)
+  }
+
+  @Trace(dispatcher = true, excludeFromTransactionTrace = true)
+  private def onCompleteWrapper[U](jobId: Object, f: Try[T] => U)(result: Try[T]): U = {
+    NewRelic.getAgent.getTransaction.startAsyncActivity(jobId)
+    f(result)
+  }
+
+  override def isCompleted: Boolean = innerFuture.isCompleted
+
+  override def value: Option[Try[T]] = innerFuture.value
+
+  @scala.throws[Exception](classOf[Exception])
+  override def result(atMost: Duration)(implicit permit: CanAwait): T = innerFuture.result(atMost)(permit)
+
+  @scala.throws[InterruptedException](classOf[InterruptedException])
+  @scala.throws[TimeoutException](classOf[TimeoutException])
+  override def ready(atMost: Duration)(implicit permit: CanAwait): this.type = {
+    ready(atMost)(permit)
+    this
+  }
+
+}
+
+/**
+ * Helper object for propagating async stuff over Scala futures.
  */
 object Tracing {
+  
 
   @Trace(dispatcher = true)
   def trace[T](segmentName: String)(body: => Future[T]): Future[T] = {
     val jobId = new Object
-    val tx = NewRelic.getAgent().getTransaction()
+    val tx = NewRelic.getAgent.getTransaction
     tx.getTracedMethod.setMetricName(segmentName)
     tx.registerAsyncActivity(jobId)
 
-    val promise = Promise[T]()
-    body onComplete complete(jobId, promise)
-    promise.future
+    val innerFuture = body
+    innerFuture match {
+      case wrapper: FutureWrapper[T] =>
+        wrapper.innerFuture onComplete complete(jobId)
+        innerFuture
+      case _ =>
+        innerFuture onComplete complete(jobId)
+        new FutureWrapper(innerFuture)
+    }
   }
 
-  @Trace(dispatcher = true)
-  private def complete[T](jobId: Object, promise: Promise[T])(result: Try[T]): Unit = {
-    NewRelic.getAgent().getTransaction().startAsyncActivity(jobId)
-    promise complete result
+  @Trace(dispatcher = true, excludeFromTransactionTrace = true)
+  private def complete[T](jobId: Object)(result: Try[T]): Unit = {
+    NewRelic.getAgent.getTransaction.startAsyncActivity(jobId)
   }
 
 }
