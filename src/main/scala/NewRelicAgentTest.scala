@@ -2,6 +2,7 @@ import java.util
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{TimeUnit, Executors}
 
+import com.newrelic.agent.TransactionApiImpl
 import com.newrelic.api.agent._
 
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -38,7 +39,7 @@ class FutureWrapper[T](segmentName: String, innerFuture: Future[T]) extends Futu
     tx.getTracedMethod.setMetricName("Java/" + segmentName + "/chained")
     tx.startAsyncActivity(jobId)
     if (loggedMetric.compareAndSet(false, true)) {
-      NewRelic.getAgent.getMetricAggregator.recordResponseTimeMetric("Async/" + segmentName, System.currentTimeMillis() - startTimestamp)
+      recordResponseTimeMetric(tx, "Async/" + segmentName, System.currentTimeMillis() - startTimestamp)
     }
     f(result)
   }
@@ -55,6 +56,11 @@ class FutureWrapper[T](segmentName: String, innerFuture: Future[T]) extends Futu
   override def ready(atMost: Duration)(implicit permit: CanAwait): this.type = {
     ready(atMost)(permit)
     this
+  }
+
+  private def recordResponseTimeMetric(tx: Transaction, metricName: String, value: Long): Unit = {
+    //NewRelic.getAgent.getMetricAggregator.recordResponseTimeMetric(metricName, value)
+    tx.asInstanceOf[TransactionApiImpl].getTransaction.getTransactionActivity.getTransactionStats.getScopedStats.getResponseTimeStats(metricName).recordResponseTime(value, TimeUnit.MILLISECONDS)
   }
 
 }
