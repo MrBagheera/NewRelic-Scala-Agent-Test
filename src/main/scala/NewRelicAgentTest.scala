@@ -1,4 +1,5 @@
 import java.util
+import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.{TimeUnit, Executors}
 
 import com.newrelic.api.agent._
@@ -15,12 +16,15 @@ case class Player(id: String, name: String, age: Int)
 /**
  * Helper class to propagate transaction to onComplete callbacks
  */
-class FutureWrapper[T](val innerFuture: Future[T]) extends Future[T] {
+class FutureWrapper[T](segmentName: String, innerFuture: Future[T]) extends Future[T] {
+
+  private val startTimestamp = System.currentTimeMillis()
+  private val loggedMetric = new AtomicBoolean(false)
 
   override def onComplete[U](f: (Try[T]) => U)(implicit executor: ExecutionContext): Unit = {
     val jobId = new Object
     val tx = NewRelic.getAgent.getTransaction
-    if (tx == null) {
+    if (tx.getTracedMethod == null) {
       throw new IllegalStateException("No transaction available")
     }
     tx.registerAsyncActivity(jobId)
@@ -28,9 +32,14 @@ class FutureWrapper[T](val innerFuture: Future[T]) extends Future[T] {
     innerFuture onComplete onCompleteWrapper(jobId, f)
   }
 
-  @Trace(dispatcher = true, excludeFromTransactionTrace = true)
+  @Trace(dispatcher = true)
   private def onCompleteWrapper[U](jobId: Object, f: Try[T] => U)(result: Try[T]): U = {
-    NewRelic.getAgent.getTransaction.startAsyncActivity(jobId)
+    val tx = NewRelic.getAgent.getTransaction
+    tx.getTracedMethod.setMetricName("Java/" + segmentName + "/chained")
+    tx.startAsyncActivity(jobId)
+    if (loggedMetric.compareAndSet(false, true)) {
+      NewRelic.getAgent.getMetricAggregator.recordResponseTimeMetric("Async/" + segmentName, System.currentTimeMillis() - startTimestamp)
+    }
     f(result)
   }
 
@@ -54,29 +63,14 @@ class FutureWrapper[T](val innerFuture: Future[T]) extends Future[T] {
  * Helper object for propagating async stuff over Scala futures.
  */
 object Tracing {
-  
 
-  @Trace(dispatcher = true)
+  @Trace
   def trace[T](segmentName: String)(body: => Future[T]): Future[T] = {
-    val jobId = new Object
     val tx = NewRelic.getAgent.getTransaction
-    tx.getTracedMethod.setMetricName(segmentName)
-    tx.registerAsyncActivity(jobId)
+    tx.getTracedMethod.setMetricName("Java/" + segmentName)
 
     val innerFuture = body
-    innerFuture match {
-      case wrapper: FutureWrapper[T] =>
-        wrapper.innerFuture onComplete complete(jobId)
-        innerFuture
-      case _ =>
-        innerFuture onComplete complete(jobId)
-        new FutureWrapper(innerFuture)
-    }
-  }
-
-  @Trace(dispatcher = true, excludeFromTransactionTrace = true)
-  private def complete[T](jobId: Object)(result: Try[T]): Unit = {
-    NewRelic.getAgent.getTransaction.startAsyncActivity(jobId)
+    new FutureWrapper(segmentName, innerFuture)
   }
 
 }
@@ -96,7 +90,7 @@ class PlayerRepository {
     }, 500, TimeUnit.MILLISECONDS)
     operationPromise.future
   }
-  
+
   def savePlayer(player: Player): Future[Player] = Tracing.trace("PlayerRepository.savePlayer") {
     val operationPromise = Promise[Player]()
     NewRelicAgentTest.executor.schedule(new Runnable() {
@@ -115,7 +109,7 @@ class PlayerRepository {
  * Typical async service
  */
 class PlayerService(playerRepository: PlayerRepository) {
-  
+
   def updatePlayerAge(id: String, newAge: Int): Future[Player] = Tracing.trace("PlayerService.updatePlayerAge") {
     playerRepository.getPlayer(id) flatMap { player =>
       val newPlayer = Player(player.id, player.name, newAge)
@@ -146,7 +140,6 @@ object NewRelicAgentTest extends App {
 
   @Trace(dispatcher = true)
   def simulateTransaction(): Unit = {
-    NewRelic.setTransactionName(null, "test")
     val id = random.alphanumeric.take(10).mkString
     println(s"Starting transaction for $id")
     val updateFuture: Future[Player] = playerService.updatePlayerAge(id, random.nextInt(100))
